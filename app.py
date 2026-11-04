@@ -11,7 +11,7 @@ stop_requested = False
 logs = []
 active_browser = None  # To force close
 
-BASE_DIR = os.getcwd()
+BASE_DIR = os.environ.get("DATA_DIR", os.getcwd())
 DS_PROFILE_DIR = os.path.join(BASE_DIR, "deepseek_profile")
 BOARD_PROFILE_DIR = os.path.join(BASE_DIR, "board_profile")
 CACHE_DIR = os.path.join(BASE_DIR, ".cache")
@@ -124,7 +124,8 @@ def automation_worker(login_url, board_url, keywords_text, affiliate_link, mode,
             log_message("🌐 Launching DeepSeek...")
             ds_context = p.chromium.launch_persistent_context(
                 DS_PROFILE_DIR, headless=True,
-                args=["--disable-blink-features=AutomationControlled"])
+                args=["--disable-blink-features=AutomationControlled",
+                      "--no-sandbox", "--disable-dev-shm-usage"])
             active_browser = ds_context
             
             if ds_cookies_data:
@@ -168,7 +169,8 @@ def automation_worker(login_url, board_url, keywords_text, affiliate_link, mode,
             log_message("🌐 Launching Board...")
             board_context = p.chromium.launch_persistent_context(
                 BOARD_PROFILE_DIR, headless=True,
-                args=["--disable-blink-features=AutomationControlled"])
+                args=["--disable-blink-features=AutomationControlled",
+                      "--no-sandbox", "--disable-dev-shm-usage"])
             
             if board_cookies_data:
                 log_message("   🍪 Injecting Board Cookies...")
