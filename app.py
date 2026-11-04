@@ -5,12 +5,10 @@ from playwright.sync_api import sync_playwright
 
 app = Flask(__name__)
 
-# --- Globals ---
 is_running = False
 stop_requested = False
 logs = []
 
-# --- Config ---
 BASE_DIR = os.getcwd()
 DS_PROFILE_DIR = os.path.join(BASE_DIR, "deepseek_profile")
 BOARD_PROFILE_DIR = os.path.join(BASE_DIR, "board_profile")
@@ -21,42 +19,29 @@ OUTPUT_LINKS = os.path.join(BASE_DIR, "thread_links.txt")
 for d in [CACHE_DIR, DS_PROFILE_DIR, BOARD_PROFILE_DIR]:
     os.makedirs(d, exist_ok=True)
 
-USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
-
-# ============================================
-# 🎯 TITLES & LOGIC
-# ============================================
-TITLE_CATEGORIES = {
-    "magazine_style": [
-        "#~^√TOP [{NUM}] Best {KW} Services in {COUNTRY}™ Real Tests & Results {YEAR}",
-        "★【TOP {NUM}】Best {KW} Providers in {COUNTRY}™ Honest List {YEAR}",
-        "»【{NUM} Best {KW} Subscriptions for {COUNTRY} Users™ Verified & Ranked {YEAR}】",
-        "[OFFICIAL] TOP [{NUM}] Best {KW} in {COUNTRY}™ Expert Picks {YEAR}",
-        "!! {NUM} Best Premium {KW} in {COUNTRY}™ 100% Working {YEAR}",
-        "★【{NUM} Best {KW} for Firestick in {COUNTRY}™ Hands-On Test {YEAR}】",
-        "»【TOP {NUM}】Cheap {KW} in {COUNTRY}™ Top Picks & Deals {YEAR}",
-        "[NEW] {NUM} Best {KW} Services {COUNTRY}™ Full Comparison {YEAR}",
-    ]
-}
-
-NUMBERS = ["3", "5", "7", "8", "10", "11", "12", "15", "20"]
-COUNTRY_LIST = ["USA", "UK", "Canada", "Australia", "Germany", "France", "Netherlands", "Spain"]
-
-DEFAULT_CUSTOM_TITLES = """#~^√TOP [{NUM}] Best {KW} Services in {COUNTRY}™ Real Tests & Results {YEAR}
-★【TOP {NUM}】Best {KW} Providers in {COUNTRY}™ Honest List {YEAR}
-»【{NUM} Best {KW} Subscriptions for {COUNTRY} Users™ Verified & Ranked {YEAR}】
-[OFFICIAL] TOP [{NUM}] Best {KW} in {COUNTRY}™ Expert Picks {YEAR}
-!! {NUM} Best Premium {KW} in {COUNTRY}™ 100% Working {YEAR}
-★【{NUM} Best {KW} for Firestick in {COUNTRY}™ Hands-On Test {YEAR}】
-»【TOP {NUM}】Cheap {KW} in {COUNTRY}™ Top Picks & Deals {YEAR}
-[NEW] {NUM} Best {KW} Services {COUNTRY}™ Full Comparison {YEAR}"""
-
 def log_message(msg):
     global logs
     timestamp = datetime.now().strftime("%H:%M:%S")
     logs.append(f"[{timestamp}] {msg}")
     if len(logs) > 200: logs.pop(0)
     print(msg)
+
+# TITLES LOGIC
+TITLE_CATEGORIES = {
+    "magazine_style": [
+        "#~^√TOP [{NUM}] Best {KW} Services in {COUNTRY}™ Real Tests & Results {YEAR}",
+        "★【TOP {NUM}】Best {KW} Providers in {COUNTRY}™ Honest List {YEAR}",
+    ]
+}
+NUMBERS = ["3", "5", "7", "8", "10", "11", "12", "15", "20"]
+COUNTRY_LIST = ["USA", "UK", "Canada", "Australia", "Germany"]
+DEFAULT_CUSTOM_TITLES = """#~^√TOP [{NUM}] Best {KW} Services in {COUNTRY}™ Real Tests & Results {YEAR}
+★【TOP {NUM}】Best {KW} Providers in {COUNTRY}™ Honest List {YEAR}"""
+
+def slugify(text):
+    text = re.sub(r'[^\w\s-]', '', text.lower())
+    text = re.sub(r'[\s_]+', '-', text)
+    return text.strip('-')[:60] or "keyword"
 
 def _smart_title_case(text):
     ACRONYMS = {"iptv": "IPTV", "4k": "4K", "8k": "8K", "hd": "HD", "usa": "USA", "uk": "UK", "uae": "UAE", "vpn": "VPN", "epg": "EPG", "m3u": "M3U", "tv": "TV"}
@@ -70,24 +55,16 @@ def _smart_title_case(text):
         else: out.append(w.capitalize())
     return " ".join(out)
 
-def slugify(text):
-    text = re.sub(r'[^\w\s-]', '', text.lower())
-    text = re.sub(r'[\s_]+', '-', text)
-    text = re.sub(r'-+', '-', text)
-    return text.strip('-')[:60] or "keyword"
-
 def _generate_unique_title(keyword, custom_titles_str, countries_str):
     hist = {}
     if os.path.exists(TITLE_HISTORY):
         try:
             with open(TITLE_HISTORY, "r", encoding="utf-8") as f: hist = json.load(f)
         except: pass
-    
     kw_key = slugify(keyword)
     used_titles = set(hist.get(kw_key, []))
     kw_clean = _smart_title_case(keyword)
     year = datetime.now().strftime("%Y")
-    
     patterns = [l.strip() for l in custom_titles_str.splitlines() if l.strip()]
     if not patterns: patterns = DEFAULT_CUSTOM_TITLES.split("\n")
 
@@ -96,12 +73,9 @@ def _generate_unique_title(keyword, custom_titles_str, countries_str):
         num = random.choice(NUMBERS)
         c_list = [c.strip() for c in countries_str.split(",") if c.strip()]
         country = random.choice(c_list) if c_list else random.choice(COUNTRY_LIST)
-
         try:
             title = pattern.format(KW=kw_clean, YEAR=year, NUM=num, COUNTRY=country, SFX="", SFX_S="")
-        except Exception:
-            continue
-
+        except Exception: continue
         title = re.sub(r'\s+', ' ', title).strip()
         if title not in used_titles:
             if kw_key not in hist: hist[kw_key] = []
@@ -112,17 +86,13 @@ def _generate_unique_title(keyword, custom_titles_str, countries_str):
             except: pass
             log_message(f"   🏷️ Title: {title}")
             return title
-
     return f"#~^√TOP [{random.choice(NUMBERS)}] {kw_clean} Services™ {year}"
 
-# ============================================
-# 🚀 WORKER THREAD
-# ============================================
 def automation_worker(login_url, board_url, keywords_text, affiliate_link, mode, custom_titles, countries, delay_sec, wait_min, max_rounds, cheetah_key):
     global is_running, stop_requested
-    
     log_message("🚀 Starting Automation...")
     keywords = [k.strip() for k in keywords_text.split('\n') if k.strip()]
+    log_message(f"📊 Total Keywords: {len(keywords)}")
     
     if os.path.exists("deepseek_session.zip"):
         log_message("📦 Extracting DeepSeek Session...")
@@ -130,20 +100,45 @@ def automation_worker(login_url, board_url, keywords_text, affiliate_link, mode,
             with zipfile.ZipFile("deepseek_session.zip", 'r') as zip_ref:
                 zip_ref.extractall(".")
         except Exception as e:
-            log_message(f"⚠️ Session extract error: {e}")
+            log_message(f"⚠️ DeepSeek session error: {e}")
+
+    if os.path.exists("board_session.zip"):
+        log_message("📦 Extracting Board Session...")
+        try:
+            with zipfile.ZipFile("board_session.zip", 'r') as zip_ref:
+                zip_ref.extractall(".")
+        except Exception as e:
+            log_message(f"⚠️ Board session error: {e}")
 
     with sync_playwright() as p:
         log_message("🌐 Launching DeepSeek...")
-        ds_context = p.chromium.launch_persistent_context(
-            DS_PROFILE_DIR, headless=True,
-            args=["--disable-blink-features=AutomationControlled"])
+        try:
+            ds_context = p.chromium.launch_persistent_context(
+                DS_PROFILE_DIR, headless=True,
+                args=["--disable-blink-features=AutomationControlled"])
+            log_message("✅ DeepSeek Context Created")
+        except Exception as e:
+            log_message(f"❌ DeepSeek Launch Error: {e}")
+            is_running = False
+            return
+
         ds_page = ds_context.pages[0] if ds_context.pages else ds_context.new_page()
-        ds_page.goto("https://chat.deepseek.com/", wait_until="domcontentloaded", timeout=90000)
+        log_message("⏳ Navigating to DeepSeek...")
+        
+        try:
+            ds_page.goto("https://chat.deepseek.com/", wait_until="domcontentloaded", timeout=90000)
+            log_message("✅ DeepSeek Page Loaded")
+        except Exception as e:
+            log_message(f"❌ DeepSeek Load Error: {e}")
+            is_running = False
+            ds_context.close()
+            return
+        
         ds_page.wait_for_timeout(6000)
 
-        log_message("⏳ Waiting for DeepSeek...")
+        log_message("⏳ Waiting for DeepSeek Login (Max 5 mins)...")
         ready = False
-        for _ in range(150):
+        for i in range(150):
             if stop_requested: break
             try:
                 ta = ds_page.locator("textarea[placeholder*='Message']").first
@@ -155,25 +150,41 @@ def automation_worker(login_url, board_url, keywords_text, affiliate_link, mode,
                 if ta.count() > 0 and ta.is_visible():
                     ready = True; break
             except: pass
+            
+            if i % 10 == 0:
+                log_message(f"   ⏳ Still waiting... ({i*2}s)")
+                
             ds_page.wait_for_timeout(2000)
 
         if not ready:
-            log_message("❌ DeepSeek login issue! Upload fresh session.")
+            log_message("❌ DeepSeek login issue! (Session may be expired or invalid)")
             is_running = False
             ds_context.close()
             return
-        log_message("✅ DeepSeek ready")
+        log_message("✅ DeepSeek Ready!")
 
         log_message("🌐 Launching Board...")
-        board_context = p.chromium.launch_persistent_context(
-            BOARD_PROFILE_DIR, headless=True,
-            args=["--disable-blink-features=AutomationControlled"])
+        try:
+            board_context = p.chromium.launch_persistent_context(
+                BOARD_PROFILE_DIR, headless=True,
+                args=["--disable-blink-features=AutomationControlled"])
+            log_message("✅ Board Context Created")
+        except Exception as e:
+            log_message(f"❌ Board Launch Error: {e}")
+            is_running = False
+            ds_context.close()
+            return
+
         board_page = board_context.pages[0] if board_context.pages else board_context.new_page()
         
         log_message("🔐 Checking board login...")
-        board_page.goto(board_url, wait_until="domcontentloaded", timeout=60000)
+        try:
+            board_page.goto(board_url, wait_until="domcontentloaded", timeout=60000)
+            log_message("✅ Board Page Loaded")
+        except Exception as e:
+            log_message(f"❌ Board Load Error: {e}")
+        
         board_page.wait_for_timeout(3000)
-        log_message("✅ Board Ready (Assuming logged in)")
 
         round_num = 1
         while not stop_requested:
@@ -185,14 +196,13 @@ def automation_worker(login_url, board_url, keywords_text, affiliate_link, mode,
             
             for i, kw in enumerate(keywords):
                 if stop_requested: break
-                
                 log_message(f"\n📌 [{i+1}/{len(keywords)}] {kw}")
                 unique_title = _generate_unique_title(kw, custom_titles, countries)
                 
                 try:
                     content_html = query_deepseek(ds_page, kw, unique_title)
                 except Exception as e:
-                    log_message(f"   ❌ DeepSeek: {e}")
+                    log_message(f"   ❌ DeepSeek Gen Error: {e}")
                     continue
 
                 if not content_html:
@@ -202,7 +212,6 @@ def automation_worker(login_url, board_url, keywords_text, affiliate_link, mode,
                 content_html = sanitize_content(content_html, affiliate_link)
                 content_html = inject_ctas(content_html, affiliate_link)
 
-                # Post Logic
                 if mode == "routeyou":
                     thread_url = create_routeyou_post(board_page, unique_title, content_html)
                 elif mode == "guest":
@@ -214,10 +223,8 @@ def automation_worker(login_url, board_url, keywords_text, affiliate_link, mode,
                     log_message(f"   ✅ Posted: {thread_url}")
                     with open(OUTPUT_LINKS, "a", encoding="utf-8") as f:
                         f.write(f"R{round_num} | {kw}\n{thread_url}\n\n")
-                    
-                    # 🆕 INDEXING LOGIC
                     if cheetah_key:
-                        log_message("   🚀 Indexing via Cheetah...")
+                        log_message("   🚀 Indexing...")
                         submit_to_cheetah(board_page, thread_url, cheetah_key)
                 else:
                     log_message(f"   ❌ Post failed")
@@ -233,18 +240,14 @@ def automation_worker(login_url, board_url, keywords_text, affiliate_link, mode,
             for _ in range(wait_min * 60):
                 if stop_requested: break
                 time.sleep(1)
-            
             round_num += 1
 
         ds_context.close()
         board_context.close()
-    
     is_running = False
-    log_message("🎉 Automation Finished!")
+    log_message("🎉 Finished!")
 
-# ============================================
-# 🛠️ HELPER FUNCTIONS
-# ============================================
+# --- HELPER FUNCTIONS ---
 def submit_to_cheetah(page, url, api_key):
     try:
         cheetah_page = page.context.new_page()
@@ -263,7 +266,6 @@ def submit_to_cheetah(page, url, api_key):
             }
         """, {"apiKey": api_key, "url": url})
         cheetah_page.close()
-        
         if result.get("ok"):
             log_message(f"   🚀 Indexed! Credits: {result['data'].get('remainingCredits', '?')}")
         else:
@@ -281,9 +283,9 @@ def query_deepseek(page, keyword, unique_title):
     prompt += f"Write a highly detailed, 100% human-like, and SEO-optimized post about \"{keyword}\".\n"
     prompt += "🔥 CRITICAL RULES:\n1. NO AI FLUFF\n2. REAL EXPERIENCE (EEAT)\n3. LSI KEYWORDS\n"
     prompt += "4. TARGET KEYWORD DENSITY 5-7 times\n"
-    prompt += "🔗 LINK PLACEHOLDER: Only use {AFF_LINK} as the link placeholder.\n"
-    prompt += "ARTICLE STRUCTURE: Intro, What is IPTV, Why Ditching Cable, How I Tested, Top 5 Providers, Table, FAQ, Final Verdict.\n"
-    prompt += "OUTPUT: Only HTML content. Start with <h1>."
+    prompt += "🔗 LINK PLACEHOLDER: Only use {AFF_LINK}.\n"
+    prompt += "ARTICLE: Intro, What is IPTV, Why Ditching Cable, How I Tested, Top 5, Table, FAQ, Verdict.\n"
+    prompt += "OUTPUT: Only HTML. Start with <h1>."
 
     textarea = page.locator("textarea[placeholder*='Message']").first
     textarea.click()
@@ -306,9 +308,7 @@ def query_deepseek(page, keyword, unique_title):
         except: current = ""
         cur_len = len(current)
         if cur_len > last_len + 30:
-            best_content = current
-            last_len = cur_len
-            stable = 0
+            best_content = current; last_len = cur_len; stable = 0
         else:
             stable += 1
             if cur_len > 500 and stable >= 2:
@@ -350,12 +350,10 @@ def inject_ctas(html_content, aff):
         f'<div style="font-size: 9pt; color: #aaa; margin-top: 12px;">⭐ Rated 4.9/5 by 10,000+ Users</div>'
         f'</div>'
     )
-    
     if '</p>' in html_content:
         html_content = html_content.replace('</p>', '</p>\n' + starting_cta, 1)
     else:
         html_content = starting_cta + "\n" + html_content
-
     final_cta = (
         f'<div style="text-align:center; margin: 30px 0 15px; padding: 30px 20px; background: linear-gradient(135deg, #1a1a2e, #16213e); border: 2px solid #e94560; border-radius: 12px;">'
         f'<h1 style="color: #e94560; margin: 0 0 10px 0; font-size: 22pt; border: none; text-align: center;">🎬 READY TO START YOUR IPTV JOURNEY?</h1>'
@@ -369,7 +367,7 @@ def inject_ctas(html_content, aff):
 
 def create_routeyou_post(page, title, content):
     try:
-        log_message("   🌍 Opening RouteYou Add News page...")
+        log_message("   🌍 Opening RouteYou...")
         page.goto("https://www.routeyou.com/news/add", wait_until="domcontentloaded", timeout=60000)
         page.wait_for_timeout(4000)
         name_box = page.locator('input[name="name"]').first
@@ -377,7 +375,6 @@ def create_routeyou_post(page, title, content):
         name_box.wait_for(state='visible', timeout=10000)
         clean_title = re.sub(r'https?://\S+', '', title).strip()
         name_box.fill(clean_title[:100])
-        log_message(f"   ✅ Title set")
         page.wait_for_timeout(3000) 
         iframe_locator = page.locator("iframe.cke_wysiwyg_frame").first
         if iframe_locator.count() > 0:
@@ -387,17 +384,12 @@ def create_routeyou_post(page, title, content):
             page.wait_for_timeout(500)
             body_locator.fill(content)
             log_message("   ✅ Content Injected!")
-        else:
-            log_message("   ⚠️ CKEditor iframe not found.")
-            return None
+        else: return None
         page.wait_for_timeout(1500)
         confirm_btn = page.locator('button:has-text("Confirm"), input[value="Confirm"]').first
         if confirm_btn.count() > 0: confirm_btn.click()
-        else: page.evaluate("() => { let btns = document.querySelectorAll('button'); for(let b of btns) { if(b.innerText.includes('Confirm')) { b.click(); return; } } }")
         page.wait_for_timeout(5000)
-        url = page.url
-        if "/news/view/" in url: return url
-        return url 
+        return page.url
     except Exception as e:
         log_message(f"   ❌ RouteYou Error: {e}")
         return None
@@ -407,36 +399,26 @@ def create_thread(page, board_url, title, content):
         if not board_url.endswith("/"): board_url += "/"
         page.goto(board_url, wait_until="domcontentloaded", timeout=60000)
         page.wait_for_timeout(2000)
-        clicked = False
-        for sel in ['a:has-text("Create Thread")', 'a[href*="/thread/new/"]', 'a[href*="action=create"]']:
+        for sel in ['a:has-text("Create Thread")', 'a[href*="/thread/new/"]']:
             try:
                 btn = page.locator(sel).first
                 if btn.count() > 0 and btn.is_visible():
-                    btn.click(); clicked = True; break
+                    btn.click(); break
             except: continue
-        if not clicked: return None
         page.wait_for_timeout(3000)
-        try:
-            subj = page.locator('input[name="subject"]').first
-            subj.wait_for(state='visible', timeout=10000)
-            subj.fill(title[:60])
-        except: return None
+        subj = page.locator('input[name="subject"]').first
+        subj.wait_for(state='visible', timeout=10000)
+        subj.fill(title[:60])
         page.wait_for_timeout(2500)
-        result = page.evaluate("""(htmlContent) => {
-            const form = document.querySelector('form.js-form-thread-new') || document.querySelector('form[id^="form_"]');
-            const formId = form ? form.id : '';
-            const ta = document.querySelector('#' + formId + '_message_input') || document.querySelector('textarea[name="message"]');
+        page.evaluate("""(htmlContent) => {
+            const ta = document.querySelector('textarea[name="message"]');
             if (ta) { ta.value = htmlContent; ta.dispatchEvent(new Event('input', { bubbles: true })); }
-            return true;
         }""", content)
         page.wait_for_timeout(1200)
-        submit_btn = page.locator('input[name="post"][value="Create Thread"], input[type="submit"][value="Create Thread"]').first
+        submit_btn = page.locator('input[value="Create Thread"]').first
         if submit_btn.count() > 0: submit_btn.click()
-        else: return None
         page.wait_for_timeout(4000)
-        url = page.url
-        if "/thread/" in url and "/create/" not in url: return url
-        return None
+        return page.url
     except Exception as e:
         log_message(f"   ❌ Error: {e}")
         return None
@@ -446,20 +428,16 @@ def create_guest_thread(page, board_url, title, content):
         if not board_url.endswith("/"): board_url += "/"
         page.goto(board_url, wait_until="domcontentloaded", timeout=60000)
         page.wait_for_timeout(2000)
-        clicked = False
         for sel in ['a:has-text("Create Thread")', 'a[href*="/thread/new/"]']:
             try:
                 btn = page.locator(sel).first
                 if btn.count() > 0 and btn.is_visible():
-                    btn.click(); clicked = True; break
+                    btn.click(); break
             except: continue
-        if not clicked: return None
         page.wait_for_timeout(3000)
-        guest_name = f"User{random.randint(1000, 9999)}"
         guest_inp = page.locator('input[name="created_by_guest_name"]').first
-        if guest_inp.count() > 0: guest_inp.fill(guest_name)
+        if guest_inp.count() > 0: guest_inp.fill(f"User{random.randint(1000, 9999)}")
         subj = page.locator('input[name="subject"]').first
-        subj.wait_for(state='visible', timeout=10000)
         subj.fill(title[:60])
         page.wait_for_timeout(2000)
         page.evaluate("""(htmlContent) => {
@@ -486,9 +464,7 @@ def create_guest_thread(page, board_url, title, content):
         popup_submit = page.locator("text='Submit'").last
         if popup_submit.count() > 0: popup_submit.click(force=True)
         page.wait_for_timeout(5000)
-        url = page.url
-        if "/thread/" in url and "/create/" not in url: return url
-        return None
+        return page.url
     except Exception as e:
         log_message(f"   ❌ Error: {e}")
         return None
@@ -497,8 +473,7 @@ def create_guest_thread(page, board_url, title, content):
 # 🌐 FLASK ROUTES & WEB UI
 # ============================================
 @app.route('/')
-def index():
-    return render_template_string(HTML_TEMPLATE)
+def index(): return render_template_string(HTML_TEMPLATE)
 
 @app.route('/upload_session', methods=['POST'])
 def upload_session():
@@ -506,18 +481,24 @@ def upload_session():
     file = request.files['file']
     if file.filename == '': return jsonify({"status": "error", "msg": "No selected file"})
     file.save("deepseek_session.zip")
-    return jsonify({"status": "success", "msg": "Session Uploaded!"})
+    return jsonify({"status": "success", "msg": "DeepSeek Session Uploaded!"})
+
+@app.route('/upload_board', methods=['POST'])
+def upload_board():
+    if 'file' not in request.files: return jsonify({"status": "error", "msg": "No file"})
+    file = request.files['file']
+    if file.filename == '': return jsonify({"status": "error", "msg": "No selected file"})
+    file.save("board_session.zip")
+    return jsonify({"status": "success", "msg": "Board Session Uploaded!"})
 
 @app.route('/start', methods=['POST'])
 def start():
     global is_running, stop_requested
     if is_running: return jsonify({"status": "error", "msg": "Already running"})
-    
     data = request.json
     is_running = True
     stop_requested = False
     logs.clear()
-    
     threading.Thread(target=automation_worker, args=(
         data.get('login_url',''), data.get('board_url',''), data.get('keywords',''), 
         data.get('affiliate_link',''), data.get('mode','normal'),
@@ -534,8 +515,7 @@ def stop():
     return jsonify({"status": "success", "msg": "Stopping..."})
 
 @app.route('/logs', methods=['GET'])
-def get_logs():
-    return jsonify({"logs": logs, "running": is_running})
+def get_logs(): return jsonify({"logs": logs, "running": is_running})
 
 HTML_TEMPLATE = """
 <!DOCTYPE html>
@@ -568,50 +548,33 @@ HTML_TEMPLATE = """
         </div>
 
         <div class="section">
+            <label>📦 Upload Board Session (ZIP):</label>
+            <input type="file" id="board_session_file">
+            <button onclick="uploadBoardSession()">Upload</button>
+        </div>
+
+        <div class="section">
             <label>🌍 Mode:</label>
             <select id="mode">
                 <option value="normal">Normal Board</option>
                 <option value="guest">Guest Board (Captcha)</option>
                 <option value="routeyou">RouteYou</option>
             </select>
-
             <div class="row">
-                <div>
-                    <label>🔐 Login URL:</label>
-                    <input type="text" id="login_url">
-                </div>
-                <div>
-                    <label>🔗 Board URL:</label>
-                    <input type="text" id="board_url" value="https://www.routeyou.com/news/add">
-                </div>
+                <div><label>🔐 Login URL:</label><input type="text" id="login_url"></div>
+                <div><label>🔗 Board URL:</label><input type="text" id="board_url" value="https://www.routeyou.com/news/add"></div>
             </div>
-            
             <div class="row">
-                <div>
-                    <label>★ Affiliate Link:</label>
-                    <input type="text" id="affiliate_link" value="https://smartiflix.com/?coupon=sunnycoupon">
-                </div>
-                <div>
-                    <label>🌍 Countries:</label>
-                    <input type="text" id="countries" value="USA, UK, Canada, Germany">
-                </div>
+                <div><label>★ Affiliate Link:</label><input type="text" id="affiliate_link" value="https://smartiflix.com/?coupon=sunnycoupon"></div>
+                <div><label>🌍 Countries:</label><input type="text" id="countries" value="USA, UK, Canada, Germany"></div>
             </div>
         </div>
 
         <div class="section">
             <div class="row">
-                <div>
-                    <label>⏱ Delay (s):</label>
-                    <input type="number" id="delay" value="10">
-                </div>
-                <div>
-                    <label>⏳ Wait (min):</label>
-                    <input type="number" id="wait" value="30">
-                </div>
-                <div>
-                    <label>🔁 Rounds (0=∞):</label>
-                    <input type="number" id="rounds" value="0">
-                </div>
+                <div><label>⏱ Delay (s):</label><input type="number" id="delay" value="10"></div>
+                <div><label>⏳ Wait (min):</label><input type="number" id="wait" value="30"></div>
+                <div><label>🔁 Rounds (0=∞):</label><input type="number" id="rounds" value="0"></div>
             </div>
             <label>🚀 Cheetah API Key (For Indexing):</label>
             <input type="text" id="cheetah_key" placeholder="Optional">
@@ -644,6 +607,16 @@ best iptv service</textarea>
             const res = await fetch('/upload_session', { method: 'POST', body: formData });
             alert((await res.json()).msg);
         }
+        
+        async function uploadBoardSession() {
+            const file = document.getElementById('board_session_file').files[0];
+            if (!file) { alert('Select a zip file'); return; }
+            const formData = new FormData();
+            formData.append('file', file);
+            const res = await fetch('/upload_board', { method: 'POST', body: formData });
+            alert((await res.json()).msg);
+        }
+
         async function startAutomation() {
             const data = {
                 login_url: document.getElementById('login_url').value,
