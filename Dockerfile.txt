@@ -1,6 +1,6 @@
 FROM python:3.10-slim
 
-# Install system dependencies for Playwright
+# Install system dependencies required for Playwright & Chromium
 RUN apt-get update && apt-get install -y \
     wget \
     gnupg \
@@ -23,13 +23,14 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# 🆕 IMPORTANT: Install Playwright Browsers with dependencies
-RUN playwright install chromium
-RUN playwright install-deps chromium
+# 🆕 Install Playwright browser + its OS dependencies
+RUN playwright install --with-deps chromium
 
 # Copy the rest of the app
 COPY . .
 
-# Expose port and run
+# Expose port (Railway usually sets PORT env variable, but 5000 is a safe default)
 EXPOSE 5000
+
+# Run the app
 CMD ["python", "app.py"]
