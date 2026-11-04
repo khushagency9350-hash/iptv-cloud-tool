@@ -8,8 +8,6 @@ app = Flask(__name__)
 # --- Globals ---
 is_running = False
 stop_requested = False
-pause_event = threading.Event()
-pause_event.set()
 logs = []
 
 # --- Config ---
@@ -23,8 +21,10 @@ OUTPUT_LINKS = os.path.join(BASE_DIR, "thread_links.txt")
 for d in [CACHE_DIR, DS_PROFILE_DIR, BOARD_PROFILE_DIR]:
     os.makedirs(d, exist_ok=True)
 
+USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+
 # ============================================
-# 🎯 TITLE CATEGORIES & LOGIC
+# 🎯 TITLES & LOGIC
 # ============================================
 TITLE_CATEGORIES = {
     "magazine_style": [
@@ -118,13 +118,12 @@ def _generate_unique_title(keyword, custom_titles_str, countries_str):
 # ============================================
 # 🚀 WORKER THREAD
 # ============================================
-def automation_worker(login_url, board_url, keywords_text, affiliate_link, mode, custom_titles, countries):
+def automation_worker(login_url, board_url, keywords_text, affiliate_link, mode, custom_titles, countries, delay_sec, wait_min, max_rounds, cheetah_key):
     global is_running, stop_requested
     
     log_message("🚀 Starting Automation...")
     keywords = [k.strip() for k in keywords_text.split('\n') if k.strip()]
     
-    # Extract Session
     if os.path.exists("deepseek_session.zip"):
         log_message("📦 Extracting DeepSeek Session...")
         try:
@@ -176,44 +175,66 @@ def automation_worker(login_url, board_url, keywords_text, affiliate_link, mode,
         board_page.wait_for_timeout(3000)
         log_message("✅ Board Ready (Assuming logged in)")
 
-        # Loop
-        for i, kw in enumerate(keywords):
+        round_num = 1
+        while not stop_requested:
+            if max_rounds > 0 and round_num > max_rounds:
+                log_message(f"🔚 Reached max rounds ({max_rounds})")
+                break
+            
+            log_message(f"\n{'█'*40}\n🔄 ROUND {round_num}\n{'█'*40}")
+            
+            for i, kw in enumerate(keywords):
+                if stop_requested: break
+                
+                log_message(f"\n📌 [{i+1}/{len(keywords)}] {kw}")
+                unique_title = _generate_unique_title(kw, custom_titles, countries)
+                
+                try:
+                    content_html = query_deepseek(ds_page, kw, unique_title)
+                except Exception as e:
+                    log_message(f"   ❌ DeepSeek: {e}")
+                    continue
+
+                if not content_html:
+                    log_message(f"   ⚠️ Empty content")
+                    continue
+
+                content_html = sanitize_content(content_html, affiliate_link)
+                content_html = inject_ctas(content_html, affiliate_link)
+
+                # Post Logic
+                if mode == "routeyou":
+                    thread_url = create_routeyou_post(board_page, unique_title, content_html)
+                elif mode == "guest":
+                    thread_url = create_guest_thread(board_page, board_url, unique_title, content_html)
+                else:
+                    thread_url = create_thread(board_page, board_url, unique_title, content_html)
+
+                if thread_url:
+                    log_message(f"   ✅ Posted: {thread_url}")
+                    with open(OUTPUT_LINKS, "a", encoding="utf-8") as f:
+                        f.write(f"R{round_num} | {kw}\n{thread_url}\n\n")
+                    
+                    # 🆕 INDEXING LOGIC
+                    if cheetah_key:
+                        log_message("   🚀 Indexing via Cheetah...")
+                        submit_to_cheetah(board_page, thread_url, cheetah_key)
+                else:
+                    log_message(f"   ❌ Post failed")
+
+                if i < len(keywords) - 1 and not stop_requested:
+                    log_message(f"   ⏱ Delay {delay_sec}s...")
+                    time.sleep(delay_sec)
+            
             if stop_requested: break
+            if max_rounds > 0 and round_num >= max_rounds: break
+
+            log_message(f"\n⏳ Waiting {wait_min} min before next round...")
+            for _ in range(wait_min * 60):
+                if stop_requested: break
+                time.sleep(1)
             
-            log_message(f"\n📌 [{i+1}/{len(keywords)}] {kw}")
-            unique_title = _generate_unique_title(kw, custom_titles, countries)
-            
-            try:
-                content_html = query_deepseek(ds_page, kw, unique_title)
-            except Exception as e:
-                log_message(f"   ❌ DeepSeek: {e}")
-                continue
-
-            if not content_html:
-                log_message(f"   ⚠️ Empty content")
-                continue
-
-            content_html = sanitize_content(content_html, affiliate_link)
-            content_html = inject_ctas(content_html, affiliate_link)
-
-            # Post Logic based on mode
-            if mode == "routeyou":
-                thread_url = create_routeyou_post(board_page, unique_title, content_html)
-            elif mode == "guest":
-                thread_url = create_guest_thread(board_page, board_url, unique_title, content_html)
-            else:
-                thread_url = create_thread(board_page, board_url, unique_title, content_html)
-
-            if thread_url:
-                log_message(f"   ✅ Posted: {thread_url}")
-                with open(OUTPUT_LINKS, "a", encoding="utf-8") as f:
-                    f.write(f"{kw}\n{thread_url}\n\n")
-            else:
-                log_message(f"   ❌ Post failed")
-
-            if i < len(keywords) - 1 and not stop_requested:
-                log_message(f"   ⏱ Delay 10s...")
-                time.sleep(10)
+            round_num += 1
 
         ds_context.close()
         board_context.close()
@@ -222,8 +243,34 @@ def automation_worker(login_url, board_url, keywords_text, affiliate_link, mode,
     log_message("🎉 Automation Finished!")
 
 # ============================================
-# 🛠️ HELPER FUNCTIONS (DeepSeek & Posts)
+# 🛠️ HELPER FUNCTIONS
 # ============================================
+def submit_to_cheetah(page, url, api_key):
+    try:
+        cheetah_page = page.context.new_page()
+        cheetah_page.goto("https://cheetahindexer.com/", wait_until="domcontentloaded", timeout=45000)
+        cheetah_page.wait_for_timeout(2000)
+        result = cheetah_page.evaluate("""
+            async (data) => {
+                try {
+                    const resp = await fetch('/api/indexing/submit', {
+                        method: 'POST',
+                        headers: { 'Authorization': 'Bearer ' + data.apiKey, 'Content-Type': 'application/json' },
+                        body: JSON.stringify({urls: [data.url]})
+                    });
+                    return { ok: resp.ok, status: resp.status, data: await resp.json() };
+                } catch(e) { return { ok: false, error: e.message }; }
+            }
+        """, {"apiKey": api_key, "url": url})
+        cheetah_page.close()
+        
+        if result.get("ok"):
+            log_message(f"   🚀 Indexed! Credits: {result['data'].get('remainingCredits', '?')}")
+        else:
+            log_message(f"   ❌ Index failed: {result.get('status')}")
+    except Exception as e:
+        log_message(f"   ❌ Index error: {e}")
+
 def query_deepseek(page, keyword, unique_title):
     try:
         page.locator("button:has-text('New chat')").first.click(timeout=3000)
@@ -325,14 +372,12 @@ def create_routeyou_post(page, title, content):
         log_message("   🌍 Opening RouteYou Add News page...")
         page.goto("https://www.routeyou.com/news/add", wait_until="domcontentloaded", timeout=60000)
         page.wait_for_timeout(4000)
-
         name_box = page.locator('input[name="name"]').first
         if name_box.count() == 0: name_box = page.locator('input[type="text"]').nth(1)
         name_box.wait_for(state='visible', timeout=10000)
         clean_title = re.sub(r'https?://\S+', '', title).strip()
         name_box.fill(clean_title[:100])
         log_message(f"   ✅ Title set")
-
         page.wait_for_timeout(3000) 
         iframe_locator = page.locator("iframe.cke_wysiwyg_frame").first
         if iframe_locator.count() > 0:
@@ -345,16 +390,13 @@ def create_routeyou_post(page, title, content):
         else:
             log_message("   ⚠️ CKEditor iframe not found.")
             return None
-
         page.wait_for_timeout(1500)
         confirm_btn = page.locator('button:has-text("Confirm"), input[value="Confirm"]').first
         if confirm_btn.count() > 0: confirm_btn.click()
         else: page.evaluate("() => { let btns = document.querySelectorAll('button'); for(let b of btns) { if(b.innerText.includes('Confirm')) { b.click(); return; } } }")
-        
         page.wait_for_timeout(5000)
         url = page.url
-        if "/news/view/" in url:
-            return url
+        if "/news/view/" in url: return url
         return url 
     except Exception as e:
         log_message(f"   ❌ RouteYou Error: {e}")
@@ -365,7 +407,6 @@ def create_thread(page, board_url, title, content):
         if not board_url.endswith("/"): board_url += "/"
         page.goto(board_url, wait_until="domcontentloaded", timeout=60000)
         page.wait_for_timeout(2000)
-
         clicked = False
         for sel in ['a:has-text("Create Thread")', 'a[href*="/thread/new/"]', 'a[href*="action=create"]']:
             try:
@@ -374,31 +415,24 @@ def create_thread(page, board_url, title, content):
                     btn.click(); clicked = True; break
             except: continue
         if not clicked: return None
-
         page.wait_for_timeout(3000)
         try:
             subj = page.locator('input[name="subject"]').first
             subj.wait_for(state='visible', timeout=10000)
             subj.fill(title[:60])
         except: return None
-
         page.wait_for_timeout(2500)
         result = page.evaluate("""(htmlContent) => {
             const form = document.querySelector('form.js-form-thread-new') || document.querySelector('form[id^="form_"]');
             const formId = form ? form.id : '';
             const ta = document.querySelector('#' + formId + '_message_input') || document.querySelector('textarea[name="message"]');
-            if (ta) {
-                ta.value = htmlContent;
-                ta.dispatchEvent(new Event('input', { bubbles: true }));
-            }
+            if (ta) { ta.value = htmlContent; ta.dispatchEvent(new Event('input', { bubbles: true })); }
             return true;
         }""", content)
-
         page.wait_for_timeout(1200)
         submit_btn = page.locator('input[name="post"][value="Create Thread"], input[type="submit"][value="Create Thread"]').first
         if submit_btn.count() > 0: submit_btn.click()
         else: return None
-
         page.wait_for_timeout(4000)
         url = page.url
         if "/thread/" in url and "/create/" not in url: return url
@@ -408,12 +442,10 @@ def create_thread(page, board_url, title, content):
         return None
 
 def create_guest_thread(page, board_url, title, content):
-    # Same as above but with guest logic
     try:
         if not board_url.endswith("/"): board_url += "/"
         page.goto(board_url, wait_until="domcontentloaded", timeout=60000)
         page.wait_for_timeout(2000)
-
         clicked = False
         for sel in ['a:has-text("Create Thread")', 'a[href*="/thread/new/"]']:
             try:
@@ -422,30 +454,22 @@ def create_guest_thread(page, board_url, title, content):
                     btn.click(); clicked = True; break
             except: continue
         if not clicked: return None
-
         page.wait_for_timeout(3000)
-        
         guest_name = f"User{random.randint(1000, 9999)}"
         guest_inp = page.locator('input[name="created_by_guest_name"]').first
         if guest_inp.count() > 0: guest_inp.fill(guest_name)
-
         subj = page.locator('input[name="subject"]').first
         subj.wait_for(state='visible', timeout=10000)
         subj.fill(title[:60])
-
         page.wait_for_timeout(2000)
         page.evaluate("""(htmlContent) => {
             const ta = document.querySelector('textarea[name="message"]');
             if (ta) { ta.value = htmlContent; ta.dispatchEvent(new Event('input', { bubbles: true })); }
         }""", content)
-
         page.wait_for_timeout(1000)
         submit_btn = page.locator('input[value="Create Thread"]').first
         if submit_btn.count() > 0: submit_btn.click()
-
         page.wait_for_timeout(3000) 
-        
-        # TOS & Captcha
         page.evaluate("""() => {
             let tos = document.querySelector('input[name="tos_checkbox"]');
             if (tos && !tos.checked) tos.click();
@@ -458,12 +482,9 @@ def create_guest_thread(page, board_url, title, content):
                 } catch(e) {}
             }
         }""")
-        
         page.wait_for_timeout(10000) 
-        
         popup_submit = page.locator("text='Submit'").last
         if popup_submit.count() > 0: popup_submit.click(force=True)
-        
         page.wait_for_timeout(5000)
         url = page.url
         if "/thread/" in url and "/create/" not in url: return url
@@ -500,7 +521,9 @@ def start():
     threading.Thread(target=automation_worker, args=(
         data.get('login_url',''), data.get('board_url',''), data.get('keywords',''), 
         data.get('affiliate_link',''), data.get('mode','normal'),
-        data.get('custom_titles',''), data.get('countries','')
+        data.get('custom_titles',''), data.get('countries',''),
+        int(data.get('delay','10')), int(data.get('wait','30')), int(data.get('rounds','0')),
+        data.get('cheetah_key','')
     ), daemon=True).start()
     return jsonify({"status": "success", "msg": "Started"})
 
@@ -530,6 +553,8 @@ HTML_TEMPLATE = """
         button.stop { background: #e94560; }
         #logs { background: #0d1b2a; padding: 15px; border-radius: 5px; height: 300px; overflow-y: auto; font-family: Consolas; font-size: 14px; }
         .section { background: #16213e; padding: 15px; border-radius: 8px; margin-bottom: 15px; }
+        .row { display: flex; gap: 10px; }
+        .row > div { flex: 1; }
     </style>
 </head>
 <body>
@@ -550,17 +575,46 @@ HTML_TEMPLATE = """
                 <option value="routeyou">RouteYou</option>
             </select>
 
-            <label>🔐 Login URL (Normal Board):</label>
-            <input type="text" id="login_url">
+            <div class="row">
+                <div>
+                    <label>🔐 Login URL:</label>
+                    <input type="text" id="login_url">
+                </div>
+                <div>
+                    <label>🔗 Board URL:</label>
+                    <input type="text" id="board_url" value="https://www.routeyou.com/news/add">
+                </div>
+            </div>
             
-            <label>🔗 Board URL (or RouteYou URL):</label>
-            <input type="text" id="board_url" value="https://www.routeyou.com/news/add">
-            
-            <label>★ Affiliate Link:</label>
-            <input type="text" id="affiliate_link" value="https://smartiflix.com/?coupon=sunnycoupon">
-            
-            <label>🌍 Countries:</label>
-            <input type="text" id="countries" value="USA, UK, Canada, Germany">
+            <div class="row">
+                <div>
+                    <label>★ Affiliate Link:</label>
+                    <input type="text" id="affiliate_link" value="https://smartiflix.com/?coupon=sunnycoupon">
+                </div>
+                <div>
+                    <label>🌍 Countries:</label>
+                    <input type="text" id="countries" value="USA, UK, Canada, Germany">
+                </div>
+            </div>
+        </div>
+
+        <div class="section">
+            <div class="row">
+                <div>
+                    <label>⏱ Delay (s):</label>
+                    <input type="number" id="delay" value="10">
+                </div>
+                <div>
+                    <label>⏳ Wait (min):</label>
+                    <input type="number" id="wait" value="30">
+                </div>
+                <div>
+                    <label>🔁 Rounds (0=∞):</label>
+                    <input type="number" id="rounds" value="0">
+                </div>
+            </div>
+            <label>🚀 Cheetah API Key (For Indexing):</label>
+            <input type="text" id="cheetah_key" placeholder="Optional">
         </div>
 
         <div class="section">
@@ -598,7 +652,11 @@ best iptv service</textarea>
                 countries: document.getElementById('countries').value,
                 custom_titles: document.getElementById('custom_titles').value,
                 keywords: document.getElementById('keywords').value,
-                mode: document.getElementById('mode').value
+                mode: document.getElementById('mode').value,
+                delay: document.getElementById('delay').value,
+                wait: document.getElementById('wait').value,
+                rounds: document.getElementById('rounds').value,
+                cheetah_key: document.getElementById('cheetah_key').value
             };
             const res = await fetch('/start', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(data) });
             alert((await res.json()).msg);
