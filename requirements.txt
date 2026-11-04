@@ -1,0 +1,6 @@
+flask
+playwright
+pypdf
+python-docx
+Pillow
+requests
