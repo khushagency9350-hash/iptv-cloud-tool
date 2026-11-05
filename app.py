@@ -2,6 +2,7 @@ from flask import Flask, render_template_string, request, jsonify
 import threading, os, re, random, string, html, json, sys, time
 from datetime import datetime
 from playwright.sync_api import sync_playwright
+import requests
 
 app = Flask(__name__)
 
@@ -12,15 +13,13 @@ logs = []
 active_browser = None  # To force close
 
 BASE_DIR = os.environ.get("DATA_DIR", os.getcwd())
-DS_PROFILE_DIR = os.path.join(BASE_DIR, "deepseek_profile")
 BOARD_PROFILE_DIR = os.path.join(BASE_DIR, "board_profile")
 CACHE_DIR = os.path.join(BASE_DIR, ".cache")
 TITLE_HISTORY = os.path.join(BASE_DIR, "title_history.json")
 OUTPUT_LINKS = os.path.join(BASE_DIR, "thread_links.txt")
-DS_COOKIES_FILE = os.path.join(BASE_DIR, "deepseek_cookies.json")
 BOARD_COOKIES_FILE = os.path.join(BASE_DIR, "board_cookies.json")
 
-for d in [CACHE_DIR, DS_PROFILE_DIR, BOARD_PROFILE_DIR]:
+for d in [CACHE_DIR, BOARD_PROFILE_DIR]:
     os.makedirs(d, exist_ok=True)
 
 def log_message(msg):
@@ -89,27 +88,67 @@ def _generate_unique_title(keyword, custom_titles_str, countries_str):
     return f"#~^√TOP [{random.choice(NUMBERS)}] {kw_clean} Services™ {year}"
 
 # ============================================
+# 🤖 DEEPSEEK API
+# ============================================
+def query_deepseek_api(keyword, unique_title, api_key):
+    """DeepSeek API se HTML article generate karta hai (no browser)."""
+    prompt = f"⚠️ USE THIS EXACT TITLE AS THE FIRST LINE: <h1>{unique_title}</h1>\n\n"
+    prompt += f"Write a highly detailed, 100% human-like, and SEO-optimized post about \"{keyword}\".\n"
+    prompt += "🔥 CRITICAL RULES:\n1. NO AI FLUFF\n2. REAL EXPERIENCE (EEAT)\n3. LSI KEYWORDS\n"
+    prompt += "4. TARGET KEYWORD DENSITY 5-7 times\n"
+    prompt += "🔗 LINK PLACEHOLDER: Only use {AFF_LINK}.\n"
+    prompt += "ARTICLE: Intro, What is IPTV, Why Ditching Cable, How I Tested, Top 5, Table, FAQ, Verdict.\n"
+    prompt += "OUTPUT: Only HTML. Start with <h1>."
+
+    log_message("   🤖 DeepSeek API call...")
+    try:
+        resp = requests.post(
+            "https://api.deepseek.com/chat/completions",
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json"
+            },
+            json={
+                "model": "deepseek-flash",
+                "messages": [{"role": "user", "content": prompt}],
+                "stream": False,
+                "temperature": 0.7,
+                "max_tokens": 4096
+            },
+            timeout=180
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        content = data["choices"][0]["message"]["content"]
+        log_message(f"   ✅ API se content mila — {len(content)} chars")
+        return ensure_h1(clean_text(content), unique_title)
+    except requests.exceptions.Timeout:
+        log_message("   ❌ API timeout (180s)")
+        return None
+    except requests.exceptions.RequestException as e:
+        log_message(f"   ❌ API error: {e}")
+        return None
+    except (KeyError, IndexError) as e:
+        log_message(f"   ❌ API response format error: {e}")
+        return None
+
+# ============================================
 # 🚀 WORKER THREAD
 # ============================================
-def automation_worker(login_url, board_url, keywords_text, affiliate_link, mode, custom_titles, countries, delay_sec, wait_min, max_rounds, cheetah_key):
+def automation_worker(login_url, board_url, keywords_text, affiliate_link, mode, custom_titles, countries, delay_sec, wait_min, max_rounds, cheetah_key, api_key):
     global is_running, stop_requested, active_browser
     
-    log_message("🚀 Starting Automation...")
+    log_message("🚀 Starting Automation (API Mode)...")
     keywords = [k.strip() for k in keywords_text.split('\n') if k.strip()]
     log_message(f"📊 Total Keywords: {len(keywords)}")
     
-    # Load Cookies
-    ds_cookies_data = None
+    if not api_key or not api_key.strip():
+        log_message("❌ DeepSeek API Key missing! Dashboard me daalo.")
+        is_running = False
+        return
+
+    # Load Board cookies
     board_cookies_data = None
-
-    if os.path.exists(DS_COOKIES_FILE):
-        log_message("🍪 Loading DeepSeek Cookies...")
-        try:
-            with open(DS_COOKIES_FILE, "r", encoding="utf-8") as f:
-                ds_cookies_data = json.load(f)
-        except Exception as e:
-            log_message(f"⚠️ DeepSeek cookies error: {e}")
-
     if os.path.exists(BOARD_COOKIES_FILE):
         log_message("🍪 Loading Board Cookies...")
         try:
@@ -120,58 +159,14 @@ def automation_worker(login_url, board_url, keywords_text, affiliate_link, mode,
 
     try:
         with sync_playwright() as p:
-            # --- Launch DeepSeek ---
-            log_message("🌐 Launching DeepSeek...")
-            ds_context = p.chromium.launch_persistent_context(
-                DS_PROFILE_DIR, headless=True,
-                args=["--disable-blink-features=AutomationControlled",
-                      "--no-sandbox", "--disable-dev-shm-usage"])
-            active_browser = ds_context
-            
-            if ds_cookies_data:
-                log_message("   🍪 Injecting DeepSeek Cookies...")
-                try:
-                    ds_context.add_cookies(ds_cookies_data)
-                except Exception as e:
-                    log_message(f"   ⚠️ Cookie inject error: {e}")
-
-            ds_page = ds_context.pages[0] if ds_context.pages else ds_context.new_page()
-            
-            log_message("⏳ Navigating to DeepSeek...")
-            try:
-                ds_page.goto("https://chat.deepseek.com/", wait_until="domcontentloaded", timeout=60000)
-                log_message("✅ DeepSeek Page Loaded")
-            except Exception as e:
-                log_message(f"❌ DeepSeek Load Error: {e}")
-                raise e
-            
-            ds_page.wait_for_timeout(5000)
-
-            log_message("⏳ Checking DeepSeek Login...")
-            ready = False
-            for i in range(60): # 2 mins max
-                if stop_requested: break
-                try:
-                    ta = ds_page.locator("textarea[placeholder*='Message']").first
-                    if ta.count() > 0 and ta.is_visible():
-                        ready = True; break
-                except: pass
-                if i % 10 == 0:
-                    log_message(f"   ⏳ Waiting... ({i*2}s)")
-                ds_page.wait_for_timeout(2000)
-
-            if not ready:
-                log_message("❌ DeepSeek Login Failed! (Cookies expired or invalid)")
-                raise Exception("DeepSeek login failed")
-            log_message("✅ DeepSeek Ready!")
-
-            # --- Launch Board ---
+            # --- Sirf Board Browser ---
             log_message("🌐 Launching Board...")
             board_context = p.chromium.launch_persistent_context(
                 BOARD_PROFILE_DIR, headless=True,
                 args=["--disable-blink-features=AutomationControlled",
                       "--no-sandbox", "--disable-dev-shm-usage"])
-            
+            active_browser = board_context
+
             if board_cookies_data:
                 log_message("   🍪 Injecting Board Cookies...")
                 try:
@@ -180,14 +175,14 @@ def automation_worker(login_url, board_url, keywords_text, affiliate_link, mode,
                     log_message(f"   ⚠️ Board Cookie error: {e}")
 
             board_page = board_context.pages[0] if board_context.pages else board_context.new_page()
-            
+
             log_message("🔐 Checking Board Login...")
             try:
                 board_page.goto(board_url, wait_until="domcontentloaded", timeout=60000)
                 log_message("✅ Board Page Loaded")
             except Exception as e:
                 log_message(f"⚠️ Board Load Warn: {e}")
-            
+
             board_page.wait_for_timeout(3000)
 
             round_num = 1
@@ -195,22 +190,18 @@ def automation_worker(login_url, board_url, keywords_text, affiliate_link, mode,
                 if max_rounds > 0 and round_num > max_rounds:
                     log_message(f"🔚 Reached max rounds ({max_rounds})")
                     break
-                
+
                 log_message(f"\n{'█'*40}\n🔄 ROUND {round_num}\n{'█'*40}")
-                
+
                 for i, kw in enumerate(keywords):
                     if stop_requested: break
                     log_message(f"\n📌 [{i+1}/{len(keywords)}] {kw}")
                     unique_title = _generate_unique_title(kw, custom_titles, countries)
-                    
-                    try:
-                        content_html = query_deepseek(ds_page, kw, unique_title)
-                    except Exception as e:
-                        log_message(f"   ❌ DeepSeek Error: {e}")
-                        continue
+
+                    content_html = query_deepseek_api(kw, unique_title, api_key)
 
                     if not content_html:
-                        log_message(f"   ⚠️ Empty content")
+                        log_message(f"   ⚠️ Empty content, skipping")
                         continue
 
                     content_html = sanitize_content(content_html, affiliate_link)
@@ -238,7 +229,7 @@ def automation_worker(login_url, board_url, keywords_text, affiliate_link, mode,
                         for _ in range(delay_sec):
                             if stop_requested: break
                             time.sleep(1)
-                
+
                 if stop_requested: break
                 if max_rounds > 0 and round_num >= max_rounds: break
 
@@ -248,7 +239,6 @@ def automation_worker(login_url, board_url, keywords_text, affiliate_link, mode,
                     time.sleep(1)
                 round_num += 1
 
-            ds_context.close()
             board_context.close()
 
     except Exception as e:
@@ -283,55 +273,6 @@ def submit_to_cheetah(page, url, api_key):
             log_message(f"   ❌ Index failed: {result.get('status')}")
     except Exception as e:
         log_message(f"   ❌ Index error: {e}")
-
-def query_deepseek(page, keyword, unique_title):
-    try:
-        page.locator("button:has-text('New chat')").first.click(timeout=3000)
-        page.wait_for_timeout(1500)
-    except: pass
-
-    prompt = f"⚠️ USE THIS EXACT TITLE AS THE FIRST LINE: <h1>{unique_title}</h1>\n\n"
-    prompt += f"Write a highly detailed, 100% human-like, and SEO-optimized post about \"{keyword}\".\n"
-    prompt += "🔥 CRITICAL RULES:\n1. NO AI FLUFF\n2. REAL EXPERIENCE (EEAT)\n3. LSI KEYWORDS\n"
-    prompt += "4. TARGET KEYWORD DENSITY 5-7 times\n"
-    prompt += "🔗 LINK PLACEHOLDER: Only use {AFF_LINK}.\n"
-    prompt += "ARTICLE: Intro, What is IPTV, Why Ditching Cable, How I Tested, Top 5, Table, FAQ, Verdict.\n"
-    prompt += "OUTPUT: Only HTML. Start with <h1>."
-
-    textarea = page.locator("textarea[placeholder*='Message']").first
-    textarea.click()
-    page.wait_for_timeout(500)
-    try: page.keyboard.press("Control+A"); page.keyboard.press("Delete")
-    except: pass
-
-    textarea.fill(prompt)
-    page.wait_for_timeout(1500)
-    page.keyboard.press("Enter")
-
-    log_message("   ⏳ Streaming...")
-    last_len = 0; stable = 0; best_content = ""; stream_start = time.time()
-    resp_sel = "div.ds-markdown"
-
-    for _ in range(240):
-        if stop_requested: return None
-        if time.time() - stream_start > 240: break
-        try: current = page.locator(resp_sel).last.inner_text()
-        except: current = ""
-        cur_len = len(current)
-        if cur_len > last_len + 30:
-            best_content = current; last_len = cur_len; stable = 0
-        else:
-            stable += 1
-            if cur_len > 500 and stable >= 2:
-                log_message(f"   ✅ Done — {cur_len} chars")
-                cleaned = clean_text(best_content or current)
-                return ensure_h1(cleaned, unique_title)
-        page.wait_for_timeout(1000)
-
-    if best_content and len(best_content) > 500:
-        cleaned = clean_text(best_content)
-        return ensure_h1(cleaned, unique_title)
-    raise Exception("Content timeout")
 
 def clean_text(text):
     t = text.strip()
@@ -386,7 +327,7 @@ def create_routeyou_post(page, title, content):
         name_box.wait_for(state='visible', timeout=10000)
         clean_title = re.sub(r'https?://\S+', '', title).strip()
         name_box.fill(clean_title[:100])
-        page.wait_for_timeout(3000) 
+        page.wait_for_timeout(3000)
         iframe_locator = page.locator("iframe.cke_wysiwyg_frame").first
         if iframe_locator.count() > 0:
             editor_frame = iframe_locator.content_frame
@@ -458,7 +399,7 @@ def create_guest_thread(page, board_url, title, content):
         page.wait_for_timeout(1000)
         submit_btn = page.locator('input[value="Create Thread"]').first
         if submit_btn.count() > 0: submit_btn.click()
-        page.wait_for_timeout(3000) 
+        page.wait_for_timeout(3000)
         page.evaluate("""() => {
             let tos = document.querySelector('input[name="tos_checkbox"]');
             if (tos && !tos.checked) tos.click();
@@ -471,7 +412,7 @@ def create_guest_thread(page, board_url, title, content):
                 } catch(e) {}
             }
         }""")
-        page.wait_for_timeout(10000) 
+        page.wait_for_timeout(10000)
         popup_submit = page.locator("text='Submit'").last
         if popup_submit.count() > 0: popup_submit.click(force=True)
         page.wait_for_timeout(5000)
@@ -485,14 +426,6 @@ def create_guest_thread(page, board_url, title, content):
 # ============================================
 @app.route('/')
 def index(): return render_template_string(HTML_TEMPLATE)
-
-@app.route('/upload_session', methods=['POST'])
-def upload_session():
-    if 'file' not in request.files: return jsonify({"status": "error", "msg": "No file"})
-    file = request.files['file']
-    if file.filename == '': return jsonify({"status": "error", "msg": "No selected file"})
-    file.save(DS_COOKIES_FILE)
-    return jsonify({"status": "success", "msg": "DeepSeek Cookies Uploaded!"})
 
 @app.route('/upload_board', methods=['POST'])
 def upload_board():
@@ -511,11 +444,12 @@ def start():
     stop_requested = False
     logs.clear()
     threading.Thread(target=automation_worker, args=(
-        data.get('login_url',''), data.get('board_url',''), data.get('keywords',''), 
+        data.get('login_url',''), data.get('board_url',''), data.get('keywords',''),
         data.get('affiliate_link',''), data.get('mode','normal'),
         data.get('custom_titles',''), data.get('countries',''),
         int(data.get('delay','10')), int(data.get('wait','30')), int(data.get('rounds','0')),
-        data.get('cheetah_key','')
+        data.get('cheetah_key',''),
+        data.get('deepseek_api_key','')
     ), daemon=True).start()
     return jsonify({"status": "success", "msg": "Started"})
 
@@ -524,13 +458,10 @@ def stop():
     global stop_requested, is_running, active_browser
     stop_requested = True
     log_message("⏹ Stop Requested...")
-    
-    # 🆕 FORCE CLOSE BROWSER
     if active_browser:
         try:
             active_browser.close()
         except: pass
-        
     is_running = False
     return jsonify({"status": "success", "msg": "Stopping..."})
 
@@ -560,11 +491,10 @@ HTML_TEMPLATE = """
 <body>
     <div class="container">
         <h1>📺 IPTV Cloud Beast</h1>
-        
+
         <div class="section">
-            <label>📦 Upload DeepSeek Cookies (JSON):</label>
-            <input type="file" id="session_file" accept=".json">
-            <button onclick="uploadSession()">Upload</button>
+            <label>🔑 DeepSeek API Key:</label>
+            <input type="text" id="deepseek_api_key" placeholder="sk-... (platform.deepseek.com se)">
         </div>
 
         <div class="section">
@@ -603,7 +533,7 @@ HTML_TEMPLATE = """
         <div class="section">
             <label>🎨 Custom Titles:</label>
             <textarea id="custom_titles" rows="4">#~^√TOP [{NUM}] Best {KW} Services in {COUNTRY}™ Real Tests & Results {YEAR}</textarea>
-            
+
             <label>🎯 Keywords:</label>
             <textarea id="keywords" rows="4">iptv subscription
 best iptv service</textarea>
@@ -613,21 +543,12 @@ best iptv service</textarea>
             <button onclick="startAutomation()">🚀 Start</button>
             <button onclick="stopAutomation()" class="stop">⏹ Stop</button>
         </div>
-        
+
         <h3>Live Logs</h3>
         <div id="logs">Waiting...</div>
     </div>
 
     <script>
-        async function uploadSession() {
-            const file = document.getElementById('session_file').files[0];
-            if (!file) { alert('Select a json file'); return; }
-            const formData = new FormData();
-            formData.append('file', file);
-            const res = await fetch('/upload_session', { method: 'POST', body: formData });
-            alert((await res.json()).msg);
-        }
-        
         async function uploadBoardSession() {
             const file = document.getElementById('board_session_file').files[0];
             if (!file) { alert('Select a json file'); return; }
@@ -649,7 +570,8 @@ best iptv service</textarea>
                 delay: document.getElementById('delay').value,
                 wait: document.getElementById('wait').value,
                 rounds: document.getElementById('rounds').value,
-                cheetah_key: document.getElementById('cheetah_key').value
+                cheetah_key: document.getElementById('cheetah_key').value,
+                deepseek_api_key: document.getElementById('deepseek_api_key').value
             };
             const res = await fetch('/start', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(data) });
             alert((await res.json()).msg);
