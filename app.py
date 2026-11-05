@@ -170,7 +170,34 @@ def automation_worker(login_url, board_url, keywords_text, affiliate_link, mode,
             if board_cookies_data:
                 log_message("   🍪 Injecting Board Cookies...")
                 try:
-                    board_context.add_cookies(board_cookies_data)
+                    clean_cookies = []
+                    for c in board_cookies_data:
+                        cookie = {
+                            "name": c["name"],
+                            "value": c["value"],
+                            "domain": c.get("domain", ""),
+                            "path": c.get("path", "/"),
+                        }
+                        exp = c.get("expirationDate") or c.get("expires")
+                        if exp and exp not in (-1, 0):
+                            cookie["expires"] = float(exp)
+                        else:
+                            cookie["expires"] = -1
+                        if c.get("httpOnly"):
+                            cookie["httpOnly"] = True
+                        if c.get("secure"):
+                            cookie["secure"] = True
+                        ss = (c.get("sameSite") or "").strip().lower()
+                        if ss == "strict":
+                            cookie["sameSite"] = "Strict"
+                        elif ss == "lax":
+                            cookie["sameSite"] = "Lax"
+                        elif ss == "none":
+                            cookie["sameSite"] = "None"
+                        clean_cookies.append(cookie)
+
+                    board_context.add_cookies(clean_cookies)
+                    log_message(f"   🍪 Injected {len(clean_cookies)} cookies")
                 except Exception as e:
                     log_message(f"   ⚠️ Board Cookie error: {e}")
 
